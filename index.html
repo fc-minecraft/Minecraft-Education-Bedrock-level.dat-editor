@@ -77,6 +77,19 @@ body {
     font-size: 16px;
     margin-right: 4px;
 }
+/* Styling for checkbox container to align checkbox and label */
+.checkbox-container {
+    display: flex;
+    align-items: center;
+    gap: 5px; /* Space between checkbox and its label */
+    margin-left: 10px; /* Add some left margin for separation */
+}
+/* Styling for the checkbox itself */
+.checkbox-container input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
 /* Container for the Monaco Editor: takes available space, bordered, rounded corners, hidden overflow */
 .editor-container {
     flex-grow: 1; /* Allows the editor to take up remaining vertical space */
@@ -106,6 +119,11 @@ body {
         <button id="load_mcworld" class="btn">Load&nbsp;MCWorld</button>
         <!-- Button to save the current edited JSON as a .dat file -->
         <button id="save_file"   class="btn">Save</button>
+        <!-- Checkbox to control automatic patching and download -->
+        <div class="checkbox-container">
+            <input type="checkbox" id="autopatch_checkbox" checked>
+            <label for="autopatch_checkbox" class="label">Auto-patch</label>
+        </div>
     </div>
 
     <!-- Container where the Monaco Editor will be initialized -->
@@ -154,7 +172,7 @@ function autoDownload(blob,filename){
 }
 /* --------------- global state ---------------------------------- */
 let editor,message_element; // Monaco editor instance and message display element
-let openBtn,loadBtn,saveBtn,verInput; // References to UI buttons and version input
+let openBtn,loadBtn,saveBtn,verInput,autopatchCheckbox; // References to UI buttons, version input, and autopatch checkbox
 let isMonaco=false,isJSZip=false; // Flags to check if Monaco and JSZip are loaded
 let targetVersion="1.21.10"; // The target Minecraft version for patching
 let originalName=""; // Stores the original file name for saving
@@ -395,6 +413,7 @@ window.onload=async()=>{
     saveBtn=document.getElementById("save_file");
     message_element=document.getElementById("message_element");
     verInput=document.getElementById("version_input");
+    autopatchCheckbox=document.getElementById("autopatch_checkbox"); // Get reference to the new checkbox
 
     // Event listener for version input changes
     verInput.oninput=()=>{
@@ -451,25 +470,18 @@ window.onload=async()=>{
             originalName=file.name; // Store original filename
             zipObj=null; // Clear any previous zip object
             levelPath=null; // Clear any previous level path
-            write("Patching level.dat…"); // Update message
+            write("Opening level.dat…"); // Update message
 
             try{
                 const buf=await file.arrayBuffer(); // Read file as ArrayBuffer
                 let obj=buf2obj(buf); // Decode binary data to NBT object
-                obj=patchRoot(obj); // Apply version patching to the NBT object
-                editor.setValue(JSON.stringify(obj,null,2)); // Display patched NBT as JSON in editor
-
-                const patched=obj2buf(obj); // Encode patched NBT object back to binary
-                const blob=new Blob([patched],{type:"application/octet-stream"}); // Create a Blob for download
-                // Generate a new filename with version info
-                const base=originalName.replace(/\.[^/.]+$/,""); // Get base name without extension
-                const patchedName=base+"-gv-"+targetVersion.replace(/\./g,"-")+".dat";
-                autoDownload(blob,patchedName); // Trigger download of the patched .dat file
-                write("Patched file downloaded."); // Success message
+                // No automatic patching or downloading for .dat files when opened
+                editor.setValue(JSON.stringify(obj,null,2)); // Display decoded NBT as JSON in editor
+                write("level.dat loaded into editor. Use 'Save' to download changes."); // Success message
                 refreshButtons(); // Refresh button states
             }catch(error){
-                console.error("Error opening/patching .dat:", error);
-                write("Failed to process level.dat. Please ensure it's a valid Minecraft Bedrock level.dat file."); // Error message
+                console.error("Error opening .dat:", error);
+                write("Failed to open level.dat. Please ensure it's a valid Minecraft Bedrock level.dat file."); // Error message
             }
         };
         inp.click(); // Programmatically click the hidden input to open file dialog
@@ -488,7 +500,7 @@ window.onload=async()=>{
             originalName=file.name; // Store original filename
             zipObj=null; // Clear any previous zip object
             levelPath=null; // Clear any previous level path
-            write("Patching world…"); // Update message
+            write("Loading MCWorld…"); // Update message
 
             try{
                 const buf=await file.arrayBuffer(); // Read file as ArrayBuffer
@@ -505,24 +517,29 @@ window.onload=async()=>{
 
                 const levelBuf=await entry.async("arraybuffer"); // Read level.dat content as ArrayBuffer
                 let obj=buf2obj(levelBuf); // Decode binary data to NBT object
-                obj=patchRoot(obj); // Apply version patching
-                editor.setValue(JSON.stringify(obj,null,2)); // Display patched NBT as JSON
 
-                const patched=obj2buf(obj); // Encode patched NBT back to binary
-                zipObj.file(levelPath,patched); // Update the level.dat file inside the zip object
+                if(autopatchCheckbox.checked){ // Check if auto-patching is enabled
+                    obj=patchRoot(obj); // Apply version patching
+                    const patched=obj2buf(obj); // Encode patched NBT back to binary
+                    zipObj.file(levelPath,patched); // Update the level.dat file inside the zip object
 
-                // Generate the updated zip file as a Blob
-                const blob=await zipObj.generateAsync({type:"blob",compression:"DEFLATE"});
-                // Generate a new filename for the patched world
-                const base=originalName.replace(/\.[^/.]+$/,"");
-                const ext=originalName.endsWith(".mcworld")?".mcworld":".zip"; // Retain original extension or default to .zip
-                const patchedName=base+"-gv-"+targetVersion.replace(/\./g,"-")+ext;
-                autoDownload(blob,patchedName); // Trigger download of the patched .mcworld file
-                write("Patched world downloaded."); // Success message
+                    // Generate the updated zip file as a Blob
+                    const blob=await zipObj.generateAsync({type:"blob",compression:"DEFLATE"});
+                    // Generate a new filename for the patched world
+                    const base=originalName.replace(/\.[^/.]+$/,"");
+                    const ext=originalName.endsWith(".mcworld")?".mcworld":".zip"; // Retain original extension or default to .zip
+                    const patchedName=base+"-gv-"+targetVersion.replace(/\./g,"-")+ext;
+                    autoDownload(blob,patchedName); // Trigger download of the patched .mcworld file
+                    write("Patched world downloaded."); // Success message
+                } else {
+                    write("MCWorld loaded into editor. Auto-patching skipped. Use 'Save' to download changes."); // Message if auto-patching is off
+                }
+
+                editor.setValue(JSON.stringify(obj,null,2)); // Display NBT as JSON (patched or unpatched)
                 refreshButtons(); // Refresh button states
             }catch(error){
                 console.error("Error loading/patching MCWorld:", error);
-                write("Failed to patch world. Please ensure it's a valid Minecraft Bedrock MCWorld/ZIP file."); // Error message
+                write("Failed to process MCWorld. Please ensure it's a valid Minecraft Bedrock MCWorld/ZIP file."); // Error message
             }
         };
         inp.click(); // Programmatically click the hidden input to open file dialog
@@ -539,7 +556,7 @@ window.onload=async()=>{
             let base=originalName?originalName.replace(/\.[^/.]+$/,""):"level";
             let ext=originalName?originalName.slice(originalName.lastIndexOf(".")):"";
             if(!ext)ext=".dat"; // Default extension to .dat if none found
-            const filename=base+"-manual"+ext; // Append "-manual" to the filename
+            const filename=base+ext;
             autoDownload(new Blob([buf],{type:"application/octet-stream"}),filename); // Trigger download
             write("Manual save complete."); // Success message
         }catch(error){
