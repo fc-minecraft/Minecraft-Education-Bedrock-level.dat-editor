@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minecraft Bedrock level.dat editor</title>
+
+<style>
+/* Basic styling for the body: no margin/padding, Inter font, flex column layout to fill viewport, light grey background */
+body {
+    margin: 0;
+    padding: 0;
+    font-family: Inter, sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden; /* Prevent body scrolling */
+    background: #f0f0f0;
+}
+/* Container for the entire application, flex column to stack elements, full height/width with padding */
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    padding: 10px;
+    box-sizing: border-box; /* Include padding in element's total width and height */
+}
+/* Container for buttons: flex row, spacing, wrapping for responsiveness, vertically centered items */
+.buttons-container {
+    display: flex;
+    gap: 10px; /* Space between buttons */
+    margin-bottom: 10px;
+    flex-wrap: wrap; /* Allow buttons to wrap to the next line on small screens */
+    align-items: center; /* Vertically align items in the middle */
+}
+/* Styling for general buttons: green background, white text, padding, rounded corners, shadow, transition effects */
+.btn {
+    background: #4caf50; /* Green */
+    border: none;
+    color: #fff;
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: background .3s, transform .2s; /* Smooth transitions for hover/active states */
+    box-shadow: 0 4px 6px rgba(0,0,0,.1); /* Subtle shadow */
+}
+/* Button hover effect: slightly darker green, subtle lift effect */
+.btn:hover {
+    background: #45a049;
+    transform: translateY(-2px);
+}
+/* Button active effect: even darker green, no lift, slightly more pressed shadow */
+.btn:active {
+    background: #367c39;
+    transform: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+}
+/* Button disabled state: greyed out, no pointer, no shadow/transform effects */
+.btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+/* Styling for the version input field */
+.version-input {
+    font-size: 16px;
+    padding: 10px 12px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    width: 110px; /* Fixed width for version input */
+}
+/* Styling for labels */
+.label {
+    font-size: 16px;
+    margin-right: 4px;
+}
+/* Container for the Monaco Editor: takes available space, bordered, rounded corners, hidden overflow */
+.editor-container {
+    flex-grow: 1; /* Allows the editor to take up remaining vertical space */
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    overflow: hidden; /* Ensures editor content stays within bounds */
+}
+/* Styling for message display element */
+.message {
+    margin-top: 10px;
+    font-size: 14px;
+    color: #333;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+    <div class="buttons-container">
+        <!-- Label for the version input -->
+        <span class="label">Target&nbsp;version:</span>
+        <!-- Input field for target Minecraft version, default value 1.21.10 -->
+        <input id="version_input" class="version-input" type="text" value="1.21.10">
+        <!-- Button to open a level.dat file -->
+        <button id="open_file"   class="btn">Open&nbsp;level.dat</button>
+        <!-- Button to load a .mcworld (ZIP) file -->
+        <button id="load_mcworld" class="btn">Load&nbsp;MCWorld</button>
+        <!-- Button to save the current edited JSON as a .dat file -->
+        <button id="save_file"   class="btn">Save</button>
+    </div>
+
+    <!-- Container where the Monaco Editor will be initialized -->
+    <div id="monaco_editor_container" class="editor-container"></div>
+    <!-- Paragraph element to display messages to the user -->
+    <p   id="message_element"         class="message"></p>
+</div>
+
+<script>
+/* --------------- helper to load external scripts ---------------- */
+/**
+ * Loads an external JavaScript script dynamically.
+ * @param {string} src - The URL of the script to load.
+ * @returns {Promise<void>} A promise that resolves when the script is loaded, or rejects if it fails.
+ */
+function loadScript(src){
+    return new Promise((resolve,reject)=>{
+        const s=document.createElement("script");
+        s.src=src;
+        s.onload=resolve; // Resolve promise on successful load
+        s.onerror=()=>reject(new Error("load "+src)); // Reject on error
+        document.head.appendChild(s);
+    });
+}
+/* --------------- ui helpers ------------------------------------ */
+/**
+ * Displays a message in the designated message element.
+ * @param {string} m - The message string to display.
+ */
+function write(m){ message_element.textContent=m; }
+
+/**
+ * Triggers an automatic download of a Blob object as a file.
+ * @param {Blob} blob - The Blob object to download.
+ * @param {string} filename - The name of the file to be downloaded.
+ */
+function autoDownload(blob,filename){
+    const url=URL.createObjectURL(blob); // Create a URL for the Blob
+    const a=document.createElement("a"); // Create a temporary anchor element
+    a.href=url;
+    a.download=filename; // Set the download filename
+    document.body.appendChild(a);
+    a.click(); // Programmatically click the anchor to trigger download
+    document.body.removeChild(a); // Clean up the temporary element
+    URL.revokeObjectURL(url); // Release the Blob URL
+}
+/* --------------- global state ---------------------------------- */
+let editor,message_element; // Monaco editor instance and message display element
+let openBtn,loadBtn,saveBtn,verInput; // References to UI buttons and version input
+let isMonaco=false,isJSZip=false; // Flags to check if Monaco and JSZip are loaded
+let targetVersion="1.21.10"; // The target Minecraft version for patching
+let originalName=""; // Stores the original file name for saving
+let zipObj=null,levelPath=null; // JSZip object and path to level.dat inside a .mcworld file
+
+/* --------------- enable/disable buttons ------------------------ */
+/**
+ * Refreshes the enabled/disabled state of the buttons based on current application state.
+ */
+function refreshButtons(){
+    openBtn.disabled=false; // Open button is always enabled
+    loadBtn.disabled=!isJSZip; // Load MCWorld is enabled only if JSZip is loaded
+    // Save button is enabled if Monaco is ready and the editor has content
+    saveBtn.disabled=!(isMonaco && editor.getValue().trim());
+}
+
+/* --------------- version helpers ------------------------------- */
+/**
+ * Converts a string version (e.g., "1.21.10") into a Minecraft-specific list format.
+ * @param {string} v - The version string.
+ * @returns {number[]} An array representing the version (e.g., [1, 21, 10, 0, 0]).
+ */
+function strToList(v){
+    const p=v.split(".").map(Number); // Split by dot and convert parts to numbers
+    while(p.length<3)p.push(0); // Pad with zeros if less than 3 components
+    return [p[0],p[1],p[2],0,0]; // Return with two extra zeros as required by MCBE NBT
+}
+/* recursive traversal and patch */
+/**
+ * Recursively patches specific NBT entries related to game version.
+ * Modifies 'baseGameVersion', 'InventoryVersion' (strings) and
+ * 'lastOpenedWithVersion', 'MinimumCompatibleClientVersion' (lists) to targetVersion.
+ * @param {object} entry - The NBT entry object to patch.
+ */
+function patchEntry(entry){
+    const listTarget=strToList(targetVersion); // Get target version in list format
+    // Patch string type entries
+    if(entry.type==="string" &&
+       (entry.name==="baseGameVersion"||entry.name==="InventoryVersion")){
+        entry.value=targetVersion;
+    }
+    // Patch list type entries (specifically id 3, which is a list of integers)
+    if(entry.type==="list" && entry.id===3 &&
+       (entry.name==="lastOpenedWithVersion"||entry.name==="MinimumCompatibleClientVersion")){
+        entry.value=listTarget;
+    }
+    // Recursively patch entries within compound tags
+    if(entry.type==="compound"){
+        entry.value.forEach(patchEntry);
+    }
+    // Recursively patch entries within lists of compound tags (e.g., entity data)
+    if(entry.type==="list" && entry.id===10){  /* list of compounds */
+        entry.value.forEach(c=>c.value.forEach(patchEntry));
+    }
+}
+/**
+ * Patches the root NBT object by traversing its data entries.
+ * @param {object} obj - The root NBT object.
+ * @returns {object} The patched NBT object.
+ */
+function patchRoot(obj){
+    obj.data.forEach(patchEntry); // Start recursive patching from the root's data
+    return obj;
+}
+/* --------------- NBT read / write ( unchanged logic ) ---------- */
+/**
+ * Converts a raw ArrayBuffer (byte data) of a level.dat file into a JavaScript object representation.
+ * This function decodes the NBT (Named Binary Tag) format used by Minecraft.
+ * @param {ArrayBuffer} buffer - The ArrayBuffer containing the level.dat file's binary data.
+ * @returns {object} An object representing the decoded NBT structure.
+ */
+function buf2obj(buffer){
+    const view=new DataView(buffer); // DataView for reading binary data
+    const len=buffer.byteLength;
+    let pos=0; // Current read position
+
+    // Read the NBT header: 4 bytes version, 4 bytes padding (unused here)
+    const version=view.getUint32(pos,true);pos+=8; // Read version, advance position by 8
+
+    // Helper functions for reading common NBT components
+    function gid(){const v=view.getUint8(pos,true);pos++;return v;} // Get Tag ID
+    function gname(){ // Get Tag Name (length-prefixed UTF-8 string)
+        const l=view.getUint16(pos,true);pos+=2; // Read string length
+        let s="";
+        for(let i=0;i<l;i++){s+=String.fromCharCode(view.getUint8(pos));pos++;} // Read characters
+        return s;
+    }
+    // Array of NBT tag names, indexed by their ID (0-12)
+    const tags="end byte short int long float double byte_array string list compound int_array long_array".split(" ");
+    // Object mapping NBT tag IDs to their respective read functions
+    const read={
+        1:()=>{const v=view.getInt8(pos,true);pos+=1;return v;}, // Read signed 8-bit integer (byte)
+        2:()=>{const v=view.getInt16(pos,true);pos+=2;return v;}, // Read signed 16-bit integer (short)
+        3:()=>{const v=view.getInt32(pos,true);pos+=4;return v;}, // Read signed 32-bit integer (int)
+        4:()=>{const v=view.getBigInt64(pos,true).toString();pos+=8;return v;}, // Read signed 64-bit integer (long), convert to string
+        5:()=>{const v=view.getFloat32(pos,true);pos+=4;return v;}, // Read 32-bit float
+        6:()=>{const v=view.getFloat64(pos,true);pos+=8;return v;}, // Read 64-bit float (double)
+        7:()=>{ // Read Byte Array
+            const l=view.getInt32(pos,true);pos+=4; // Read array length
+            const a=[];for(let i=0;i<l;i++)a.push(read[1]()); // Read each byte
+            return a;
+        },
+        8:()=>{ // Read String
+            const l=view.getUint16(pos,true);pos+=2; // Read string length
+            let s="";for(let i=0;i<l;i++){s+=String.fromCharCode(view.getUint8(pos));pos++;} // Read characters
+            return s;
+        },
+        9:()=>{ // Read List
+            const id=gid(); // Get the type ID of elements in the list
+            const l=view.getInt32(pos,true);pos+=4; // Read list length
+            const e={id,value:[]}; // Store ID and an array for values
+            for(let i=0;i<l;i++)e.value.push(read[id]()); // Read each element using its specific reader
+            return e;
+        },
+        10:()=>{ // Read Compound (recursive)
+            const v=[];
+            let id=gid(); // Read the first tag ID
+            while(id){ // Loop until an End tag (ID 0) is encountered
+                const n=gname(); // Read tag name
+                const e={type:tags[id],name:n}; // Create entry object
+                if(id!==9){ // If not a list, read value directly
+                    e.value=read[id]();
+                }else{ // If a list, read its sub-type ID and value
+                    const t=read[id]();
+                    e.id=t.id;
+                    e.value=t.value;
+                }
+                v.push(e); // Add entry to the compound's value array
+                id=gid(); // Read next tag ID
+            }
+            return v;
+        },
+        11:()=>{ // Read Int Array
+            const l=view.getInt32(pos,true);pos+=4; // Read array length
+            const a=[];for(let i=0;i<l;i++)a.push(read[3]()); // Read each int
+            return a;
+        },
+        12:()=>{ // Read Long Array
+            const l=view.getInt32(pos,true);pos+=4; // Read array length
+            const a=[];for(let i=0;i<l;i++)a.push(read[4]()); // Read each long
+            return a;
+        }
+    };
+    const data=[];
+    while(pos<len){ // Continue reading until end of buffer
+        const id=gid(); // Read tag ID
+        const n=gname(); // Read tag name
+        const e={type:tags[id],name:n}; // Create entry object
+        if(id!==9){
+            e.value=read[id]();
+        }else{
+            const t=read[id]();
+            e.id=t.id;
+            e.value=t.value;
+        }
+        data.push(e); // Add entry to the root data array
+    }
+    return{version,data}; // Return the complete decoded NBT object
+}
+
+/**
+ * Converts a JavaScript object representation of an NBT structure back into a raw ArrayBuffer (binary data).
+ * This function encodes the NBT (Named Binary Tag) format.
+ * @param {object} obj - The JavaScript object representing the NBT structure.
+ * @returns {ArrayBuffer} An ArrayBuffer containing the encoded binary data.
+ */
+function obj2buf(obj){
+    // Array of NBT tag names, indexed by their ID (0-12)
+    const tags="end byte short int long float double byte_array string list compound int_array long_array".split(" ");
+    // Object mapping NBT tag names to their IDs
+    const ids={};tags.forEach((n,i)=>ids[n]=i);
+
+    // Scratch buffer and DataView for writing multi-byte values
+    const scratch=new ArrayBuffer(8);
+    const view=new DataView(scratch);
+    const bytes=[]; // Array to store individual bytes
+
+    // Helper to push a byte to the bytes array
+    const push=n=>bytes.push(n);
+
+    // Helper functions for writing various data types
+    const w8=n=>{view.setUint8(0,n,true);push(view.getUint8(0));}; // Write unsigned 8-bit int
+    const w16=n=>{view.setUint16(0,n,true);push(view.getUint8(0));push(view.getUint8(1));}; // Write unsigned 16-bit int
+    const w32=n=>{view.setUint32(0,n,true);for(let i=0;i<4;i++)push(view.getUint8(i));}; // Write unsigned 32-bit int
+    const wi8=n=>{view.setInt8(0,n,true);push(view.getUint8(0));}; // Write signed 8-bit int
+    const wi16=n=>{view.setInt16(0,n,true);for(let i=0;i<2;i++)push(view.getUint8(i));}; // Write signed 16-bit int
+    const wi32=n=>{view.setInt32(0,n,true);for(let i=0;i<4;i++)push(view.getUint8(i));}; // Write signed 32-bit int
+    const wi64=n=>{view.setBigInt64(0,BigInt(n),true);for(let i=0;i<8;i++)push(view.getUint8(i));}; // Write signed 64-bit int (BigInt)
+    const wf32=n=>{view.setFloat32(0,n,true);for(let i=0;i<4;i++)push(view.getUint8(i));}; // Write 32-bit float
+    const wf64=n=>{view.setFloat64(0,n,true);for(let i=0;i<8;i++)push(view.getUint8(i));}; // Write 64-bit float
+    const wc=s=>{for(let i=0;i<s.length;i++)push(s.charCodeAt(i));}; // Write character codes for string
+    const wid=(id,n)=>{w8(id);w16(n.length);wc(n);}; // Write tag ID and length-prefixed name
+
+    // Object mapping NBT tag IDs to their respective write functions
+    const write={
+        1:wi8,2:wi16,3:wi32,4:wi64,5:wf32,6:wf64, // Primitive types
+        7:a=>{wi32(a.length);a.forEach(v=>wi8(v));}, // Byte Array
+        8:s=>{w16(s.length);wc(s);}, // String
+        9:o=>{w8(o.id);wi32(o.value.length);o.value.forEach(v=>write[o.id](v));}, // List
+        10:t=>{ // Compound (recursive)
+            t.forEach(e=>{
+                const id=ids[e.type]; // Get ID from type name
+                wid(id,e.name); // Write ID and name
+                if(e.type!=="list")write[id](e.value); // If not a list, write value directly
+                else write[id](e); // If a list, pass the full list object
+            });
+            w8(0); // Write End tag (ID 0) to mark end of compound
+        },
+        11:a=>{wi32(a.length);a.forEach(v=>wi32(v));}, // Int Array
+        12:a=>{wi64(a.length);a.forEach(v=>wi64(v));} // Long Array
+    };
+
+    // Write NBT header: version and 4 zero bytes (for file size, patched later)
+    w32(obj.version);
+    w32(0); // Placeholder for length, will be updated later
+
+    // Write the main compound tag (root of the NBT structure)
+    write[10](obj.data);
+
+    bytes.pop(); // Remove the last 0x00 byte (End tag) for some reason related to MCBE format specific parsing
+
+    // Patch the actual size of the NBT data (excluding the 8-byte header) into the header
+    view.setUint32(0,bytes.length-8,true); // Calculate size and set it in the scratch buffer
+    for(let i=0;i<4;i++)bytes[i+4]=view.getUint8(i); // Copy these 4 bytes into the main bytes array
+
+    return(new Uint8Array(bytes)).buffer; // Return the final ArrayBuffer
+}
+
+/* --------------- main ------------------------------------------ */
+/**
+ * Main initialization function, executed when the window loads.
+ * Sets up event listeners, loads external libraries (Monaco Editor, JSZip), and handles file operations.
+ */
+window.onload=async()=>{
+    // Get references to DOM elements
+    openBtn=document.getElementById("open_file");
+    loadBtn=document.getElementById("load_mcworld");
+    saveBtn=document.getElementById("save_file");
+    message_element=document.getElementById("message_element");
+    verInput=document.getElementById("version_input");
+
+    // Event listener for version input changes
+    verInput.oninput=()=>{
+        // Update targetVersion, default to "1.21.10" if input is empty
+        targetVersion=verInput.value.trim()||"1.21.10";
+    };
+
+    // Initially disable all buttons until components are loaded
+    openBtn.disabled=loadBtn.disabled=saveBtn.disabled=true;
+    write("Loading components…");
+
+    // Load Monaco Editor's loader script
+    await loadScript("https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js");
+    // Configure require.js for Monaco and JSZip
+    require.config({paths:{
+        vs:"https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs",
+        jszip:"https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min"
+    }});
+    // Load Monaco Editor main module
+    require(["vs/editor/editor.main"],()=>{
+        // Create the Monaco Editor instance
+        editor=monaco.editor.create(
+            document.getElementById("monaco_editor_container"),
+            {
+                value:"", // Initial empty content
+                language:"json", // Set syntax highlighting to JSON
+                theme:"vs-dark", // Dark theme
+                automaticLayout:true, // Automatically adjust layout on container resize
+                minimap:{enabled:false} // Disable minimap for cleaner interface
+            }
+        );
+        isMonaco=true; // Set flag that Monaco is ready
+        // Attach listener to editor content changes to refresh button states
+        editor.onDidChangeModelContent(refreshButtons);
+        refreshButtons(); // Initial button state refresh
+
+        // Load JSZip library
+        require(["jszip"],JSZip=>{
+            window.JSZip=JSZip; // Make JSZip globally available
+            isJSZip=true; // Set flag that JSZip is ready
+            refreshButtons(); // Refresh button states after JSZip loads
+        });
+    });
+
+    /* ---------- open .dat ----------- */
+    // Event listener for "Open level.dat" button click
+    openBtn.onclick=()=>{
+        const inp=document.createElement("input"); // Create a hidden file input element
+        inp.type="file";
+        inp.accept=".dat"; // Accept only .dat files
+        inp.onchange=async e=>{
+            if(!e.target.files.length)return; // If no file selected, exit
+            const file=e.target.files[0];
+            originalName=file.name; // Store original filename
+            zipObj=null; // Clear any previous zip object
+            levelPath=null; // Clear any previous level path
+            write("Patching level.dat…"); // Update message
+
+            try{
+                const buf=await file.arrayBuffer(); // Read file as ArrayBuffer
+                let obj=buf2obj(buf); // Decode binary data to NBT object
+                obj=patchRoot(obj); // Apply version patching to the NBT object
+                editor.setValue(JSON.stringify(obj,null,2)); // Display patched NBT as JSON in editor
+
+                const patched=obj2buf(obj); // Encode patched NBT object back to binary
+                const blob=new Blob([patched],{type:"application/octet-stream"}); // Create a Blob for download
+                // Generate a new filename with version info
+                const base=originalName.replace(/\.[^/.]+$/,""); // Get base name without extension
+                const patchedName=base+"-gv-"+targetVersion.replace(/\./g,"-")+".dat";
+                autoDownload(blob,patchedName); // Trigger download of the patched .dat file
+                write("Patched file downloaded."); // Success message
+                refreshButtons(); // Refresh button states
+            }catch(error){
+                console.error("Error opening/patching .dat:", error);
+                write("Failed to process level.dat. Please ensure it's a valid Minecraft Bedrock level.dat file."); // Error message
+            }
+        };
+        inp.click(); // Programmatically click the hidden input to open file dialog
+    };
+
+    /* ---------- open .mcworld ----------- */
+    // Event listener for "Load MCWorld" button click
+    loadBtn.onclick=()=>{
+        if(!isJSZip){write("JSZip not ready");return;} // Ensure JSZip is loaded
+        const inp=document.createElement("input"); // Create a hidden file input element
+        inp.type="file";
+        inp.accept=".mcworld,.zip"; // Accept .mcworld or .zip files
+        inp.onchange=async e=>{
+            if(!e.target.files.length)return; // If no file selected, exit
+            const file=e.target.files[0];
+            originalName=file.name; // Store original filename
+            zipObj=null; // Clear any previous zip object
+            levelPath=null; // Clear any previous level path
+            write("Patching world…"); // Update message
+
+            try{
+                const buf=await file.arrayBuffer(); // Read file as ArrayBuffer
+                zipObj=new window.JSZip(); // Create new JSZip instance
+                zipObj=await zipObj.loadAsync(buf); // Load the zip file asynchronously
+
+                // Try to find level.dat within common paths in the zip
+                const known=["level.dat","world/level.dat","worlds/level.dat"];
+                let entry=null;
+                for(const p of known){if(zipObj.files[p]){entry=zipObj.files[p];levelPath=p;break;}}
+                // If not found in known paths, search for any file ending with /level.dat
+                if(!entry){for(const n in zipObj.files){if(n.endsWith("/level.dat")){entry=zipObj.files[n];levelPath=n;break;}}}
+                if(!entry){write("level.dat missing in the MCWorld file.");return;} // If level.dat not found, error
+
+                const levelBuf=await entry.async("arraybuffer"); // Read level.dat content as ArrayBuffer
+                let obj=buf2obj(levelBuf); // Decode binary data to NBT object
+                obj=patchRoot(obj); // Apply version patching
+                editor.setValue(JSON.stringify(obj,null,2)); // Display patched NBT as JSON
+
+                const patched=obj2buf(obj); // Encode patched NBT back to binary
+                zipObj.file(levelPath,patched); // Update the level.dat file inside the zip object
+
+                // Generate the updated zip file as a Blob
+                const blob=await zipObj.generateAsync({type:"blob",compression:"DEFLATE"});
+                // Generate a new filename for the patched world
+                const base=originalName.replace(/\.[^/.]+$/,"");
+                const ext=originalName.endsWith(".mcworld")?".mcworld":".zip"; // Retain original extension or default to .zip
+                const patchedName=base+"-gv-"+targetVersion.replace(/\./g,"-")+ext;
+                autoDownload(blob,patchedName); // Trigger download of the patched .mcworld file
+                write("Patched world downloaded."); // Success message
+                refreshButtons(); // Refresh button states
+            }catch(error){
+                console.error("Error loading/patching MCWorld:", error);
+                write("Failed to patch world. Please ensure it's a valid Minecraft Bedrock MCWorld/ZIP file."); // Error message
+            }
+        };
+        inp.click(); // Programmatically click the hidden input to open file dialog
+    };
+
+    /* ---------- manual save ----------- */
+    // Event listener for "Save" button click (manual save of current editor content)
+    saveBtn.onclick=async()=>{
+        write("Saving current JSON…"); // Update message
+        try{
+            const obj=JSON.parse(editor.getValue()); // Parse JSON from editor content
+            const buf=obj2buf(obj); // Encode JSON object back to binary NBT
+            // Determine filename based on original or default
+            let base=originalName?originalName.replace(/\.[^/.]+$/,""):"level";
+            let ext=originalName?originalName.slice(originalName.lastIndexOf(".")):"";
+            if(!ext)ext=".dat"; // Default extension to .dat if none found
+            const filename=base+"-manual"+ext; // Append "-manual" to the filename
+            autoDownload(new Blob([buf],{type:"application/octet-stream"}),filename); // Trigger download
+            write("Manual save complete."); // Success message
+        }catch(error){
+            console.error("Error during manual save:", error);
+            write("Save failed. Please ensure the JSON in the editor is valid."); // Error message
+        }
+    };
+};
+</script>
+</body>
+</html>
